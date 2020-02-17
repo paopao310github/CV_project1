@@ -64,21 +64,23 @@ class ASPP(nn.Module):
 
 #------------------------------------------------------------------------------
 def upsample(x,scale):
-    x_size = x.shape[-2:]*scale
-    return F.interpolate(x, size=x_size, mode='bilinear', align_corners=False)
+    C, H, W = x.shape[-3:]
+    return F.interpolate(x, size=(C,H*scale,W*scale), mode='bilinear', align_corners=False)
 
 class DCNNconv(nn.Module):
-    def __init__(self, in_channels,out_channels,kernel_size=3,padding=1,dilation=1,stride=1):
+    def __init__(self, in_channels,out_channels,kernel_size=3,padding=1,dilation=1,stride=1,pooling=False):
         super(DCNNconv, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, 
                             padding=padding, dilation=dilation, stride=stride,bias=False)
         self.BN = nn.BatchNorm2d(out_channels)
         self.Relu = nn.ReLU()
-        self.pooling = nn.MaxPool2d(kernel_size=2,stride=2)
-    
+        self.maxpooling = nn.MaxPool2d(kernel_size=2,stride=2)
+
+        self.pooling = pooling
+
     def forward(self,x):
         x = self.Relu(self.BN(self.conv(x)))
-        x = self.pooling(x)
+        if self.pooling: x = self.maxpooling(x)
         return x
         
 
@@ -86,9 +88,9 @@ class DCNN(nn.Module):
     def __init__(self, in_channels):
         super(DCNN, self).__init__()
 
-        self.block1 = DCNNconv(in_channels, 64, stride=2) # 1/4
-        self.block2 = DCNNconv(64, 128)  # 1/8 
-        self.block3 = DCNNconv(128, 256) # 1/16
+        self.block1 = DCNNconv(in_channels, 64, stride=2,pooling=True) # 1/4
+        self.block2 = DCNNconv(64,  128, pooling=True)  # 1/8 
+        self.block3 = DCNNconv(128, 256, pooling=True) # 1/16
         self.block4 = DCNNconv(256, 256, dilation=2)  # 1/16
         self.block5 = DCNNconv(256, 256, dilation=4)  # 1/16
         self.block6 = DCNNconv(256, 256, dilation=8)  # 1/16
@@ -96,6 +98,7 @@ class DCNN(nn.Module):
 
     def forward(self,x):
         x = self.block1(x)
+        llf = x # low level feature
         x = self.block2(x)
         x = self.block3(x)
         x = self.block4(x)
@@ -103,16 +106,16 @@ class DCNN(nn.Module):
         x = self.block6(x)
         x = self.block7(x)
 
-        return x
+        return x, llf
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels,num_class):
         super(Decoder, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels,in_channels,1)
-        self.conv3 = nn.Conv2d(in_channels,in_channels*2, 3, stride=1,padding=1)
+        self.conv1 = nn.Conv2d(in_channels//4,in_channels,1)
+        self.conv3 = nn.Conv2d(in_channels, num_class, 3, stride=1,padding=1)
 
-    def forward(self,DCNN_output,ASPP_output):
-        x = self.conv1(DCNN_output)
+    def forward(self,LLF,ASPP_output):
+        x = self.conv1(LLF)
         skip = upsample(ASPP_output, scale=4)
         x = torch.cat([x,skip],dim=1)
         x = self.conv3(x)
@@ -121,17 +124,15 @@ class Decoder(nn.Module):
         return x
 
 class Deeplabv3p(nn.Module):
-    def __init__(self,in_channels):
+    def __init__(self,in_channels,num_class):
         super(Deeplabv3p,self)
         self.DCNN = DCNN(in_channels)
         self.ASPP = ASPP(256, [6,12,18])
-        self.Decoder = Decoder(256)
+        self.Decoder = Decoder(256,num_class)
 
     def forward(self,x):
-        x = self.DCNN(x)
-        DCNN_output = x
-        x = self.APSS(x)
-        ASPP_output = x
-        x = self.Decoder(DCNN_output,ASPP_output)
+        x,LLF = self.DCNN(x)
+        ASPP_output = self.APSS(x)
+        x = self.Decoder(LLF,ASPP_output)
 
         return x
